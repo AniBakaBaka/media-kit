@@ -5,7 +5,6 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'package:flutter/widgets.dart';
 
-import 'package:media_kit_video/media_kit_video_controls/src/controls/cupertino.dart';
 import 'package:media_kit_video/media_kit_video_controls/src/controls/material.dart';
 import 'package:media_kit_video/media_kit_video_controls/src/controls/material_desktop.dart';
 
@@ -42,20 +41,6 @@ class VideoControlsThemeDataInjector extends StatefulWidget {
 class _VideoControlsThemeDataInjectorState
     extends State<VideoControlsThemeDataInjector> {
   late final builders = <Widget Function(Widget)>[
-    // CupertinoVideoControlsTheme
-    (child) {
-      final theme = CupertinoVideoControlsTheme.maybeOf(
-        widget.context ?? context,
-      );
-      final normal = theme?.normal ?? kDefaultCupertinoVideoControlsThemeData;
-      final fullscreen = theme?.fullscreen ??
-          kDefaultCupertinoVideoControlsThemeDataFullscreen;
-      return CupertinoVideoControlsTheme(
-        normal: normal,
-        fullscreen: fullscreen,
-        child: child,
-      );
-    },
     // MaterialVideoControlsTheme
     (child) {
       final theme = MaterialVideoControlsTheme.maybeOf(
