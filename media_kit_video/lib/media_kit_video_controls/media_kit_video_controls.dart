@@ -7,7 +7,6 @@
 export 'package:media_kit_video/media_kit_video_controls/src/controls/no.dart';
 export 'package:media_kit_video/media_kit_video_controls/src/controls/adaptive.dart';
 export 'package:media_kit_video/media_kit_video_controls/src/controls/material.dart';
-export 'package:media_kit_video/media_kit_video_controls/src/controls/cupertino.dart';
 export 'package:media_kit_video/media_kit_video_controls/src/controls/material_desktop.dart';
 export 'package:media_kit_video/media_kit_video_controls/src/controls/methods/fullscreen.dart';
 export 'package:media_kit_video/media_kit_video_controls/src/controls/widgets/fullscreen_inherited_widget.dart';

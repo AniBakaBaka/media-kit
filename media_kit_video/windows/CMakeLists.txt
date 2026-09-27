@@ -12,6 +12,15 @@ project(${PROJECT_NAME} LANGUAGES CXX)
 
 set(PLUGIN_NAME "media_kit_video_plugin")
 
+option(MEDIA_KIT_VIDEO_ENABLE_DLSS "Enable AniBaka's Windows video bridge" OFF)
+set(VIDEO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MEDIA_KIT_VIDEO_ENABLE_DLSS)
+  if(NOT TARGET baka_dlss_gpu)
+    message(FATAL_ERROR "MEDIA_KIT_VIDEO_ENABLE_DLSS requires the host's baka_dlss_gpu target")
+  endif()
+  set(VIDEO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/anibaka")
+endif()
+
 # This is shipped as part of package:media_kit_libs_*** package(s).
 # Must be built before this target.
 set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
@@ -28,16 +37,22 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
 
   add_library(
     ${PLUGIN_NAME} SHARED
-    "angle_surface_manager.cc"
-    "media_kit_video_plugin_c_api.cc"
-    "media_kit_video_plugin.cc"
-    "video_output_manager.cc"
-    "video_output.cc"
-    "utils.cc"
+    "${VIDEO_SOURCE_DIR}/angle_surface_manager.cc"
+    "${VIDEO_SOURCE_DIR}/media_kit_video_plugin_c_api.cc"
+    "${VIDEO_SOURCE_DIR}/media_kit_video_plugin.cc"
+    "${VIDEO_SOURCE_DIR}/video_output_manager.cc"
+    "${VIDEO_SOURCE_DIR}/video_output.cc"
+    "${VIDEO_SOURCE_DIR}/utils.cc"
     ${PLUGIN_SOURCES}
   )
 
   apply_standard_settings(${PLUGIN_NAME})
+
+  if(MEDIA_KIT_VIDEO_ENABLE_DLSS)
+    target_link_libraries(${PLUGIN_NAME} PRIVATE baka_dlss_gpu)
+    target_compile_definitions(${PLUGIN_NAME} PRIVATE NOMINMAX)
+    target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
+  endif()
 
   set_target_properties(
     ${PLUGIN_NAME} PROPERTIES
