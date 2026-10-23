@@ -5,7 +5,9 @@
 # Use of this source code is governed by MIT license that can be found in the LICENSE file.
 
 cmake_minimum_required(VERSION 3.14)
-cmake_policy(SET CMP0175 NEW)
+if(POLICY CMP0175)
+  cmake_policy(SET CMP0175 NEW)
+endif()
 
 # This option is read by the other packages which are part of package:media_kit.
 option(MEDIA_KIT_LIBS_AVAILABLE "package:media_kit libraries are available." ON)
@@ -64,67 +66,76 @@ function(check_directory_exists_and_not_empty dir result_var)
   endif()
 endfunction()
 
-# Detect architecture and set appropriate libmpv archive
-if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
-  set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-20241021-git-0f78584.7z")
-  set(LIBMPV_MD5 "6ecf18e85b093c3f7edb16f3ee6603f3")
-else()
-  set(LIBMPV_ARCH "aarch64")
-  set(LIBMPV "mpv-dev-aarch64-20241021-git-0f78584.7z")
-  set(LIBMPV_MD5 "5b507a35db13eee6cb7eb21e8be7c83d")
-endif()
-
-# Download URL for the libmpv archive from the latest release
-set(LIBMPV_URL "https://github.com/media-kit/libmpv-win32-video-cmake/releases/download/20241021/${LIBMPV}")
-
-# Download location of the libmpv archive.
-set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
-set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
-
-download_and_verify(
-  ${LIBMPV_URL}
-  ${LIBMPV_MD5}
-  ${LIBMPV_ARCHIVE}
-)
-
-check_directory_exists_and_not_empty(${LIBMPV_SRC} LIBMPV_SRC_VALID)
-
-# Find 7zip for extraction (preferred for .7z files)
+# Find 7zip for ANGLE and the standard libmpv archive.
 find_program(SEVENZ_EXECUTABLE NAMES 7z 7za)
 
-# Extract the libmpv archive.
-if(NOT LIBMPV_SRC_VALID)
-  message(STATUS "Extracting ${LIBMPV}...")
-  make_directory("${LIBMPV_SRC}")
-  add_custom_target("${PROJECT_NAME}_LIBMPV_EXTRACT" ALL)
-  
-  if(SEVENZ_EXECUTABLE)
-    message(STATUS "Using 7zip for extraction: ${SEVENZ_EXECUTABLE}")
-    add_custom_command(
-      TARGET "${PROJECT_NAME}_LIBMPV_EXTRACT"
-      POST_BUILD
-      COMMAND "${SEVENZ_EXECUTABLE}" x -y "\"${LIBMPV_ARCHIVE}\""
-      COMMAND xcopy "\"${LIBMPV_SRC}/include/mpv\"" "\"${LIBMPV_SRC}/mpv\"" /E /H /C /I
-      COMMAND rmdir "\"${LIBMPV_SRC}/include\"" /S /Q
-      COMMAND ren "\"${LIBMPV_SRC}/mpv\"" "\"include\""
-      WORKING_DIRECTORY "${LIBMPV_SRC}"
-    )
+option(MEDIA_KIT_LIBS_ENABLE_ANIMEJANAI "Bundle the pinned AnimeJaNai libmpv runtime" OFF)
+if(MEDIA_KIT_LIBS_ENABLE_ANIMEJANAI)
+  include(animejanai.cmake)
+else()
+  # Detect architecture and set appropriate libmpv archive
+  if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
+    set(LIBMPV_ARCH "x86_64")
+    set(LIBMPV "mpv-dev-x86_64-20241021-git-0f78584.7z")
+    set(LIBMPV_MD5 "6ecf18e85b093c3f7edb16f3ee6603f3")
   else()
-    message(STATUS "7zip not found, falling back to CMake tar")
-    add_custom_command(
-      TARGET "${PROJECT_NAME}_LIBMPV_EXTRACT"
-      POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E tar xzf "\"${LIBMPV_ARCHIVE}\""
-      COMMAND xcopy "\"${LIBMPV_SRC}/include/mpv\"" "\"${LIBMPV_SRC}/mpv\"" /E /H /C /I
-      COMMAND rmdir "\"${LIBMPV_SRC}/include\"" /S /Q
-      COMMAND ren "\"${LIBMPV_SRC}/mpv\"" "\"include\""
-      WORKING_DIRECTORY "${LIBMPV_SRC}"
-    )
+    set(LIBMPV_ARCH "aarch64")
+    set(LIBMPV "mpv-dev-aarch64-20241021-git-0f78584.7z")
+    set(LIBMPV_MD5 "5b507a35db13eee6cb7eb21e8be7c83d")
   endif()
-endif()
 
-# ------------------------------------------------------------------------------
+  # Download URL for the libmpv archive from the latest release
+  set(LIBMPV_URL "https://github.com/media-kit/libmpv-win32-video-cmake/releases/download/20241021/${LIBMPV}")
+
+  # Download location of the libmpv archive.
+  set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
+  set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
+
+  download_and_verify(
+    ${LIBMPV_URL}
+    ${LIBMPV_MD5}
+    ${LIBMPV_ARCHIVE}
+  )
+
+  check_directory_exists_and_not_empty(${LIBMPV_SRC} LIBMPV_SRC_VALID)
+
+  # Extract the libmpv archive.
+  if(NOT LIBMPV_SRC_VALID)
+    message(STATUS "Extracting ${LIBMPV}...")
+    make_directory("${LIBMPV_SRC}")
+    add_custom_target("${PROJECT_NAME}_LIBMPV_EXTRACT" ALL)
+
+    if(SEVENZ_EXECUTABLE)
+      message(STATUS "Using 7zip for extraction: ${SEVENZ_EXECUTABLE}")
+      add_custom_command(
+        TARGET "${PROJECT_NAME}_LIBMPV_EXTRACT"
+        POST_BUILD
+        COMMAND "${SEVENZ_EXECUTABLE}" x -y "\"${LIBMPV_ARCHIVE}\""
+        COMMAND xcopy "\"${LIBMPV_SRC}/include/mpv\"" "\"${LIBMPV_SRC}/mpv\"" /E /H /C /I
+        COMMAND rmdir "\"${LIBMPV_SRC}/include\"" /S /Q
+        COMMAND ren "\"${LIBMPV_SRC}/mpv\"" "\"include\""
+        WORKING_DIRECTORY "${LIBMPV_SRC}"
+      )
+    else()
+      message(STATUS "7zip not found, falling back to CMake tar")
+      add_custom_command(
+        TARGET "${PROJECT_NAME}_LIBMPV_EXTRACT"
+        POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E tar xzf "\"${LIBMPV_ARCHIVE}\""
+        COMMAND xcopy "\"${LIBMPV_SRC}/include/mpv\"" "\"${LIBMPV_SRC}/mpv\"" /E /H /C /I
+        COMMAND rmdir "\"${LIBMPV_SRC}/include\"" /S /Q
+        COMMAND ren "\"${LIBMPV_SRC}/mpv\"" "\"include\""
+        WORKING_DIRECTORY "${LIBMPV_SRC}"
+      )
+    endif()
+  endif()
+
+  # ------------------------------------------------------------------------------
+
+  set(LIBMPV_INCLUDE_DIR "${LIBMPV_SRC}/include")
+endif()
+set(MEDIA_KIT_LIBMPV_ROOT "${LIBMPV_SRC}" PARENT_SCOPE)
+set(MEDIA_KIT_LIBMPV_INCLUDE_DIR "${LIBMPV_INCLUDE_DIR}" PARENT_SCOPE)
 
 # ANGLE archive containing the pre-built shared libraries & headers.
 set(ANGLE "ANGLE.7z")
@@ -163,6 +174,7 @@ if(NOT ANGLE_SRC_VALID)
     message(STATUS "7zip not found, falling back to CMake tar")
     add_custom_command(
       TARGET "${PROJECT_NAME}_ANGLE_EXTRACT"
+      POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E tar xzf "\"${ANGLE_ARCHIVE}\""
       WORKING_DIRECTORY "${ANGLE_SRC}"
     )

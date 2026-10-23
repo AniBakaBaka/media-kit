@@ -35,15 +35,17 @@ std::runtime_error SyncError(const char* operation,unsigned long code) {
 
 int ANGLESurfaceManager::instance_count_ = 0;
 
-ANGLESurfaceManager::ANGLESurfaceManager(int32_t width, int32_t height)
+ANGLESurfaceManager::ANGLESurfaceManager(int32_t width, int32_t height, bool native_gpu)
     : width_(width), height_(height) {
   mutex_ = ::CreateMutex(NULL, FALSE, NULL);
-  Create();
+  if (native_gpu) native_ = NativeGLSurface::TryCreate(width, height);
+  if (!native_) Create();
   instance_count_++;
 }
 
 ANGLESurfaceManager::~ANGLESurfaceManager() {
-  CleanUp(true);
+  if (native_) native_.reset();
+  else CleanUp(true);
   ::ReleaseMutex(mutex_);
   ::CloseHandle(mutex_);
   instance_count_--;
@@ -55,10 +57,12 @@ void ANGLESurfaceManager::SetSize(int32_t width, int32_t height) {
   }
   width_ = width;
   height_ = height;
+  if (native_) { native_->Resize(width, height); return; }
   Create();
 }
 
 void ANGLESurfaceManager::Draw(std::function<void()> callback, bool boundedWait) {
+  if (native_) { native_->Draw(callback); return; }
   ::WaitForSingleObject(mutex_, INFINITE);
   try {
     MakeCurrent(true);
@@ -74,6 +78,7 @@ void ANGLESurfaceManager::Draw(std::function<void()> callback, bool boundedWait)
 }
 
 void ANGLESurfaceManager::Read() {
+  if (native_) { native_->Read(); return; }
   ::WaitForSingleObject(mutex_, INFINITE);
   if (d3d_11_device_context_ != nullptr) {
     d3d_11_device_context_->CopyResource(d3d_11_texture_2D_.Get(),
@@ -84,6 +89,7 @@ void ANGLESurfaceManager::Read() {
 }
 
 void ANGLESurfaceManager::MakeCurrent(bool value) {
+  if (native_) { native_->MakeCurrent(value); return; }
   if (value) {
     if(eglMakeCurrent(display_,surface_,surface_,context_)!=EGL_TRUE)
       throw SyncError("ANGLE make current failed",static_cast<unsigned long>(eglGetError()));

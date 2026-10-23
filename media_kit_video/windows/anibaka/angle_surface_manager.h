@@ -17,11 +17,11 @@
 
 #include <Windows.h>
 
-#include <d3d.h>
 #include <d3d11.h>
 #include <wrl.h>
 
 #include "utils.h"
+#include "native_gl_surface.h"
 
 #include <cstdint>
 #include <functional>
@@ -39,10 +39,14 @@ class ANGLESurfaceManager {
  public:
   const int32_t width() const { return width_; }
   const int32_t height() const { return height_; }
-  const HANDLE handle() const { return handle_; }
-  ID3D11Texture2D* source_texture() const { return internal_d3d_11_texture_2D_.Get(); }
+  const HANDLE handle() const { return native_ ? native_->handle() : handle_; }
+  ID3D11Texture2D* source_texture() const { return native_ ? native_->source() : internal_d3d_11_texture_2D_.Get(); }
+  ID3D11Texture2D* output_texture() const { return native_ ? native_->output() : d3d_11_texture_2D_.Get(); }
+  int framebuffer() const { return native_ ? static_cast<int>(native_->framebuffer()) : 0; }
+  bool native_cuda() const { return native_ != nullptr; }
+  void* Resolve(const char* name) const { return native_ ? native_->Resolve(name) : reinterpret_cast<void*>(eglGetProcAddress(name)); }
 
-  ANGLESurfaceManager(int32_t width, int32_t height);
+  ANGLESurfaceManager(int32_t width, int32_t height, bool native_gpu = true);
 
   ~ANGLESurfaceManager();
 
@@ -70,6 +74,7 @@ class ANGLESurfaceManager {
 
   int32_t width_ = 1;
   int32_t height_ = 1;
+  std::unique_ptr<NativeGLSurface> native_;
   HANDLE internal_handle_ = nullptr;
   HANDLE handle_ = nullptr;
 

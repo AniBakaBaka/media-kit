@@ -16,7 +16,7 @@ option(MEDIA_KIT_VIDEO_ENABLE_DLSS "Enable AniBaka's Windows video bridge" OFF)
 set(VIDEO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MEDIA_KIT_VIDEO_ENABLE_DLSS)
   if(NOT TARGET baka_dlss_gpu)
-    message(FATAL_ERROR "MEDIA_KIT_VIDEO_ENABLE_DLSS requires the host's baka_dlss_gpu target")
+    add_subdirectory(anibaka/dlss_realtime)
   endif()
   set(VIDEO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/anibaka")
 endif()
@@ -24,6 +24,11 @@ endif()
 # This is shipped as part of package:media_kit_libs_*** package(s).
 # Must be built before this target.
 set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
+set(LIBMPV_INCLUDE_DIR "${LIBMPV_SRC}/include")
+if(DEFINED MEDIA_KIT_LIBMPV_ROOT)
+  set(LIBMPV_SRC "${MEDIA_KIT_LIBMPV_ROOT}")
+  set(LIBMPV_INCLUDE_DIR "${MEDIA_KIT_LIBMPV_INCLUDE_DIR}")
+endif()
 set(ANGLE_SRC "${CMAKE_BINARY_DIR}/ANGLE")
 
 # Deal with MSVC incompatiblity
@@ -31,7 +36,7 @@ add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 
 if(MEDIA_KIT_LIBS_AVAILABLE)
   include_directories(
-    "${LIBMPV_SRC}/include"
+    "${LIBMPV_INCLUDE_DIR}"
     "${ANGLE_SRC}/include"
   )
 
@@ -49,7 +54,12 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
   apply_standard_settings(${PLUGIN_NAME})
 
   if(MEDIA_KIT_VIDEO_ENABLE_DLSS)
-    target_link_libraries(${PLUGIN_NAME} PRIVATE baka_dlss_gpu)
+    target_sources(${PLUGIN_NAME} PRIVATE
+      "${VIDEO_SOURCE_DIR}/video_state.cc"
+      "${VIDEO_SOURCE_DIR}/native_gl_surface.cc")
+    target_link_libraries(${PLUGIN_NAME} PRIVATE
+      baka_dlss_gpu opengl32 d3d11 dxgi gdi32 user32)
+    include("${VIDEO_SOURCE_DIR}/probes.cmake")
     target_compile_definitions(${PLUGIN_NAME} PRIVATE NOMINMAX)
     target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
   endif()

@@ -7,6 +7,7 @@
 // LICENSE file.
 #include "media_kit_video_plugin.h"
 #include "utils.h"
+#include "video_state.h"
 
 #include <Windows.h>
 #include <cmath>
@@ -103,6 +104,18 @@ void MediaKitVideoPlugin::ProcessMainThreadTasks() {
 void MediaKitVideoPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  if (method_call.method_name() == "AnimeJaNai.Properties") {
+    const auto& args = std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto handle = std::stoll(std::get<std::string>(args.at(flutter::EncodableValue("handle"))));
+    flutter::EncodableMap values;
+    if (const auto properties = GetVideoProperties(handle)) {
+      for (const auto& entry : *properties) {
+        values.emplace(flutter::EncodableValue(entry.first), flutter::EncodableValue(entry.second));
+      }
+    }
+    result->Success(flutter::EncodableValue(values));
+    return;
+  }
   if (method_call.method_name()=="Dlss.Configure") {
     try {
       const auto& args=std::get<flutter::EncodableMap>(*method_call.arguments());
@@ -222,8 +235,11 @@ void MediaKitVideoPlugin::HandleMethodCall(
     auto handle =
         std::get<std::string>(arguments[flutter::EncodableValue("handle")]);
     auto handle_value = static_cast<int64_t>(std::stoll(handle.c_str()));
-    video_output_manager_->Dispose(handle_value);
-    result->Success(flutter::EncodableValue(std::monostate{}));
+    auto reply = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
+    video_output_manager_->Dispose(handle_value, [this, reply] {
+      // NativePlayer must not terminate mpv while its GPU renderer is alive.
+      RunOnMainThread([reply] { reply->Success(flutter::EncodableValue(std::monostate{})); });
+    });
   } else if (method_call.method_name().compare("VideoOutputManager.SetSize") ==
              0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());

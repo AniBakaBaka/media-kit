@@ -1,15 +1,34 @@
-# AniBaka Windows video output overlay
+# AniBaka Windows video output
 
 Based on the Windows sources in `media_kit_video` **2.0.1**, distributed under
 the included MIT license. Upstream: https://github.com/media-kit/media-kit.
 
 This fork selects these sources when the host sets
-`MEDIA_KIT_VIDEO_ENABLE_DLSS=ON` before adding Flutter plugins. The host must
-provide the `baka_dlss_gpu` target and its public `video_bridge.h` header;
-AniBaka owns that backend under `windows/runner/dlss_realtime`.
+`MEDIA_KIT_VIDEO_ENABLE_DLSS=ON` before adding Flutter plugins. The package
+builds its own `baka_dlss_gpu` target from `dlss_realtime/`, including its
+public `video_bridge.h` header, fixed NGX SDK downloads and license notices.
+The migrated GPU backend retains AniBaka's GPLv3 license in that directory;
+the original renderer and vendor components retain their existing MIT licenses.
+No host-owned renderer sources or post-registration source overrides are needed.
 The option defaults to OFF and builds the original upstream Windows sources.
 Other platforms and the upstream Dart API are unchanged. Reconcile this
 directory against upstream when upgrading the plugin.
+
+For AnimeJaNai, also use `media_kit_libs_windows_video` from the same fork
+revision and set `MEDIA_KIT_LIBS_ENABLE_ANIMEJANAI=ON` before adding Flutter
+plugins. That package owns the verified x64 libmpv archive, import library,
+headers, extraction tool and corresponding runtime notices. Inference libraries
+and models continue to be installed on demand by the application's Dart layer.
+
+AnimeJaNai, Anime4K and DLSS share the D3D11/ANGLE presentation path.
+`VideoStateObserver` uses a separate mpv client and typed property events;
+Flutter reads `AnimeJaNai.Properties` snapshots without synchronous UI-thread
+mpv getters. Timing changes use the observer's asynchronous property API.
+Resizing retains the registered Flutter texture, and completed frame leases
+keep published resources alive across output changes. Disposal responds only
+after GPU output and mpv render resources have been released with a valid GL
+context. The developer target `baka_video_pipeline_probe` is excluded from
+normal application builds and bundles; its source is in `tool/video_pipeline_probe`.
 
 AniBaka changes:
 

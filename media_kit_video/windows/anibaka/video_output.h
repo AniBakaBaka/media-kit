@@ -19,6 +19,7 @@
 #include <memory>
 #include <atomic>
 #include "video_bridge.h"
+#include "video_state.h"
 
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
@@ -77,10 +78,10 @@ class VideoOutput {
       std::function<void(int64_t, int64_t, int64_t)> callback);
 
   void SetSize(std::optional<int64_t> width, std::optional<int64_t> height);
-  void RefreshDlss() { NotifyRender(); }
+  void RefreshDlss() { NotifyRender(true); }
 
  private:
-  void NotifyRender();
+  void NotifyRender(bool force = false);
 
   void Render();
 
@@ -98,6 +99,8 @@ class VideoOutput {
 
   mpv_handle* handle_ = nullptr;
   mpv_render_context* render_context_ = nullptr;
+  std::unique_ptr<VideoStateObserver> video_state_;
+  std::atomic<bool> force_render_{false};
   int64_t texture_id_ = 0;
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
   ThreadPool* thread_pool_ref_ = nullptr;
@@ -125,6 +128,9 @@ class VideoOutput {
   // H/W rendering.
 
   std::unique_ptr<ANGLESurfaceManager> surface_manager_ = nullptr;
+  // Keep the last published surface alive while the next size is rendering.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> published_texture_;
+  bool surface_pending_ = false;
   std::unordered_map<int64_t,
                      std::unique_ptr<FlutterDesktopGpuSurfaceDescriptor>>
       textures_ = {};
