@@ -120,11 +120,19 @@ VideoOutput::VideoOutput(int64_t handle,
     }
   });
   future.wait();
-  video_state_->Start([this] { NotifyRender(true); });
+  video_state_->Start([this] { NotifyRender(); });
 }
 
 VideoOutput::~VideoOutput() {
-  destroyed_ = true;
+  {
+    std::lock_guard<std::mutex> lock(timing_mutex_);
+    destroyed_ = true;
+    timing_changed_.notify_all();
+  }
+  {
+    std::lock_guard<std::mutex> lock(textures_mutex_);
+    if (capture_ready_) { auto completed = std::move(capture_ready_); completed("Video output has been disposed"); }
+  }
   if (render_context_) mpv_render_context_set_update_callback(render_context_, nullptr, nullptr);
   video_state_->Stop();
   RemoveDlssVideoStatus(reinterpret_cast<int64_t>(handle_));
@@ -199,38 +207,51 @@ void VideoOutput::NotifyRender(bool force) {
     const bool forced = force_render_.exchange(false);
     const auto updates = mpv_render_context_update(render_context_);
     if (!forced && !(updates & MPV_RENDER_UPDATE_FRAME)) return;
+    mpv_render_frame_info frame{};
+    mpv_render_context_get_info(render_context_, {MPV_RENDER_PARAM_NEXT_FRAME_INFO, &frame});
+    // A reconfiguration can invalidate a queued frame before dimensions clear.
+    // Consume that notification without clearing the published texture.
+    if (!forced && !(frame.flags & MPV_RENDER_FRAME_INFO_PRESENT)) return;
     const auto video = video_state_->Snapshot();
     // Filter/decoder reconfiguration temporarily has no video. Rendering that
     // notification clears the public image to black; keep the completed frame.
     if (video.width <= 0 || video.height <= 0) return;
     const auto settings=GetDlssVideoSettings();
-    if(settings.enabled || dlss_) {
-      const std::string path=video_state_->Snapshot().path;
+    if(settings->enabled || dlss_) {
+      const auto& path=video.path;
       if(path!=dlss_media_path_) {
         dlss_media_path_=path; dlss_failed_=false; previous_target_=0; previous_position_=-1;
         ResetDlss();
       }
     }
-    if(settings.revision!=dlss_revision_) {
-      dlss_revision_=settings.revision; dlss_failed_=false; previous_target_=0; previous_position_=-1;
+    if(settings->revision!=dlss_revision_) {
+      dlss_revision_=settings->revision; dlss_failed_=false; previous_target_=0; previous_position_=-1;
       // The player switch bypasses processing while retaining this video's
       // pipeline. Closing the laboratory master gate releases GPU memory.
-      if(!settings.enabled && settings.runtime.empty()) ResetDlss();
+      if(!settings->enabled && settings->runtime.empty()) ResetDlss();
       else { std::lock_guard<std::mutex> lock(textures_mutex_); dlss_visible_=false; }
       // mpv's core can be waiting for this render worker. A synchronous set
       // here creates a core/render lock cycle when enhancements are toggled.
-      video_state_->SetTimingOffset(settings.enabled ? .1 : 0);
+      video_state_->SetTimingOffset(settings->enabled ? .1 : 0);
     }
-    CheckAndResize(); Render();
+    CheckAndResize(); Render(frame);
   });
 }
 
-void VideoOutput::Render() {
+void VideoOutput::RenderFrame(std::function<void(std::string)> completed) {
+  NotifyRender(true);
+  thread_pool_ref_->Post([this, completed = std::move(completed)] {
+    try {
+      if (destroyed_) throw std::runtime_error("Video output has been disposed");
+      { std::lock_guard<std::mutex> lock(textures_mutex_); capture_ready_ = std::move(completed); }
+      registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+    } catch (const std::exception& error) { completed(error.what()); }
+  });
+}
+
+void VideoOutput::Render(const mpv_render_frame_info& frame) {
   if (texture_id_) {
     const auto settings=GetDlssVideoSettings();
-    mpv_render_frame_info frame{};
-    mpv_render_param frameInfo{MPV_RENDER_PARAM_NEXT_FRAME_INFO,&frame};
-    if(settings.enabled) mpv_render_context_get_info(render_context_,frameInfo);
     // H/W
     if (surface_manager_ != nullptr) {
       try {
@@ -246,13 +267,13 @@ void VideoOutput::Render() {
             {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, nullptr},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
-        int block=settings.enabled ? 0 : 1;
+        int block=settings->enabled ? 0 : 1;
         params[1].data=&block;
         mpv_render_context_render(render_context_, params);
-      },settings.enabled);
-      // All D3D commands execute here, never in Flutter's raster callback.
-      surface_manager_->Read();
+      },settings->enabled);
       if (surface_pending_) {
+        // Complete the first copy before exposing a replacement handle.
+        surface_manager_->Read();
         {
           std::lock_guard<std::mutex> lock(textures_mutex_);
           auto& texture = *textures_.at(texture_id_);
@@ -273,11 +294,11 @@ void VideoOutput::Render() {
         ResetDlss();
         return;
       }
-      if (settings.enabled) Enhance(frame);
+      if (settings->enabled) Enhance(frame);
     }
     // S/W
     if (pixel_buffer_ != nullptr) {
-      if(settings.enabled) SetDlssVideoStatus(reinterpret_cast<int64_t>(handle_),"普通画面：当前使用软件渲染，DLSS 需要 NVIDIA 硬件渲染");
+      if(settings->enabled) SetDlssVideoStatus(reinterpret_cast<int64_t>(handle_),"普通画面：当前使用软件渲染，DLSS 需要 NVIDIA 硬件渲染");
       int32_t size[]{
           static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->width),
           static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->height),
@@ -292,12 +313,7 @@ void VideoOutput::Render() {
       };
       mpv_render_context_render(render_context_, params);
     }
-    try {
-      // Notify Flutter that a new frame is available.
-      registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-    } catch (...) {
-      // Prevent any redundant exceptions if the texture is unregistered etc.
-    }
+    registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
   }
 }
 
@@ -306,7 +322,7 @@ void VideoOutput::Enhance(const mpv_render_frame_info& frame) {
   const auto owner=reinterpret_cast<int64_t>(handle_);
   try {
     const auto settings=GetDlssVideoSettings();
-    if (!settings.enabled || settings.revision!=dlss_revision_) return;
+    if (!settings->enabled || settings->revision!=dlss_revision_) return;
     const auto state = video_state_->Snapshot();
     double fps=state.fps,position=state.position;
     if(!std::isfinite(fps) || fps<=0) {
@@ -319,25 +335,25 @@ void VideoOutput::Enhance(const mpv_render_frame_info& frame) {
     if(state.hdr) throw std::runtime_error("HDR 视频暂不支持 DLSS 视频增强");
     std::shared_ptr<DlssVideoBridge> bridge;
     { std::lock_guard<std::mutex> lock(textures_mutex_); bridge=dlss_; }
-    const bool configurationChanged=dlss_applied_revision_!=settings.revision;
+    const bool configurationChanged=dlss_applied_revision_!=settings->revision;
     // A repeat must reuse the completed image, not feed the same sample into
     // DLSS again with Reset=1 and throw away its temporal reconstruction.
     if(bridge && !configurationChanged && previous_position_>=0 &&
         ((frame.flags&MPV_RENDER_FRAME_INFO_REPEAT)!=0 ||
          (frame.flags&MPV_RENDER_FRAME_INFO_PRESENT)==0)) return;
-    if(bridge && dlss_applied_revision_!=settings.revision) {
-      if(bridge->CanReuse(surface_manager_->width(),surface_manager_->height(),settings)) {
-        bridge->UpdateSettings(settings);
+    if(bridge && dlss_applied_revision_!=settings->revision) {
+      if(bridge->CanReuse(surface_manager_->width(),surface_manager_->height(),*settings)) {
+        bridge->UpdateSettings(*settings);
       } else {
         ResetDlss(); bridge.reset();
       }
     }
     if(!bridge) {
       SetDlssVideoStatus(owner,"正在按所选效果初始化当前视频的 NVIDIA 增强…");
-      bridge=std::make_shared<DlssVideoBridge>(surface_manager_->source_texture(),settings,fps);
+      bridge=std::make_shared<DlssVideoBridge>(surface_manager_->source_texture(),*settings,fps);
       std::lock_guard<std::mutex> lock(textures_mutex_); dlss_=bridge;
     }
-    dlss_applied_revision_=settings.revision;
+    dlss_applied_revision_=settings->revision;
     const bool timedDiscontinuity=frame.target_time>0 && previous_target_>0 &&
         (frame.target_time<=previous_target_ || frame.target_time-previous_target_>250000);
     const bool reset=timedDiscontinuity || previous_position_<0 ||
@@ -351,48 +367,36 @@ void VideoOutput::Enhance(const mpv_render_frame_info& frame) {
       std::lock_guard<std::mutex> lock(textures_mutex_); dlss_visible_=false; return;
     }
     auto waitUntil=[&](int64_t target) {
-      // No advanced-control mode: the mpv core remains free to handle seeks and
-      // pause while this worker paces output using its audio-clock deadline.
-      while(!destroyed_ && target>mpv_get_time_us(handle_)) {
-        if(GetDlssVideoSettings().revision!=dlss_revision_) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      return !destroyed_ && GetDlssVideoSettings().revision==dlss_revision_;
+      const auto remaining = std::chrono::microseconds(std::max<int64_t>(0, target-mpv_get_time_us(handle_)));
+      std::unique_lock<std::mutex> lock(timing_mutex_);
+      return !timing_changed_.wait_for(lock, remaining, [&] {
+        return destroyed_ || GetDlssVideoSettings()->revision!=dlss_revision_;
+      });
     };
     const auto now=mpv_get_time_us(handle_);
-    std::string fgState=reset ? "等待连续原帧" : !interpolate ? "运行库要求跳过" : "处理完成太晚，已跳过";
-    if(interpolate && (midpoint<=0 || frame.target_time<=0 || frame.target_time>=now+150000))
-      fgState="显示时间不可用，已跳过";
     if(interpolate && midpoint>0 && frame.target_time>now+2000 && frame.target_time<now+150000) {
       if(!waitUntil(midpoint)) return;
       if(mpv_get_time_us(handle_)<frame.target_time-2000) {
         if(bridge->Publish(true)) {
           { std::lock_guard<std::mutex> lock(textures_mutex_); dlss_visible_=true; }
           registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-          fgState="已提交中间帧";
-        } else fgState="对比参考帧尚未就绪，已跳过";
+        }
       }
     }
     if(frame.target_time>now && frame.target_time<now+150000 && !waitUntil(frame.target_time)) return;
-    if(GetDlssVideoSettings().revision!=dlss_revision_ || destroyed_) return;
+    if(GetDlssVideoSettings()->revision!=dlss_revision_ || destroyed_) return;
     if(!bridge->Publish(false)) return;
     { std::lock_guard<std::mutex> lock(textures_mutex_); dlss_visible_=true; }
     previous_target_=frame.target_time; previous_position_=position;
-    temporal_frames_=reset ? 1 : temporal_frames_+1;
     if(dlss_failed_) return;
-    std::string activeStatus=bridge->wasRead()
-        ? "增强画面已提交" : "增强计算完成，等待画面提交";
-    activeStatus+=settings.neuralRendering ? " · NR 改绘开启" : " · 原画直接输入";
-    activeStatus+=settings.superResolution ? " · 2 倍超分" : " · 超分关闭";
-    activeStatus+=" · 输入 "+std::to_string(surface_manager_->width())+" × "+std::to_string(surface_manager_->height());
-    activeStatus+=" → 输出 "+std::to_string(bridge->width())+" × "+std::to_string(bridge->height());
-    activeStatus+=" · 时序累计 "+std::to_string(temporal_frames_)+" 帧";
-    if(settings.comparison) activeStatus+=" · 对比：左原帧 / 右增强与插帧";
-    activeStatus+=settings.frameGeneration
-        ? " · FG："+fgState+" · 生成帧提交 "+std::to_string(bridge->generatedSubmitted())+
-            " / 播放器读取 "+std::to_string(bridge->generatedRead())
-        : " · 帧生成关闭";
-    SetDlssVideoStatus(owner,activeStatus);
+    const bool submitted = bridge->wasRead();
+    if (configurationChanged || dlss_submitted_ != submitted) {
+      dlss_submitted_ = submitted;
+      std::string activeStatus = submitted ? "增强画面已提交" : "增强计算完成，等待画面提交";
+      activeStatus += " · " + std::to_string(surface_manager_->width()) + "×" + std::to_string(surface_manager_->height()) +
+          " → " + std::to_string(bridge->width()) + "×" + std::to_string(bridge->height());
+      SetDlssVideoStatus(owner,activeStatus);
+    }
   } catch(const std::exception& error) {
     dlss_failed_=true;
     ResetDlss();
@@ -404,7 +408,8 @@ void VideoOutput::Enhance(const mpv_render_frame_info& frame) {
 void VideoOutput::SetTextureUpdateCallback(
     std::function<void(int64_t, int64_t, int64_t)> callback) {
   texture_update_callback_ = callback;
-  texture_update_callback_(texture_id_, GetVideoWidth(), GetVideoHeight());
+  const auto [width, height] = GetVideoSize();
+  texture_update_callback_(texture_id_, width, height);
 }
 
 void VideoOutput::SetSize(std::optional<int64_t> width,
@@ -444,7 +449,7 @@ void VideoOutput::SetSize(std::optional<int64_t> width,
 
 void VideoOutput::CheckAndResize() {
   // Check if a new texture with different dimensions is needed.
-  auto required_width = GetVideoWidth(), required_height = GetVideoHeight();
+  const auto [required_width, required_height] = GetVideoSize();
   if (required_width < 1 || required_height < 1) {
     // Invalid.
     return;
@@ -471,10 +476,11 @@ void VideoOutput::CheckAndResize() {
 
 void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   const auto settings=GetDlssVideoSettings();
-  if(dlss_ && settings.enabled &&
-      !dlss_->CanReuse(static_cast<unsigned>(required_width),static_cast<unsigned>(required_height),settings)) ResetDlss();
+  if(dlss_ && settings->enabled &&
+      !dlss_->CanReuse(static_cast<unsigned>(required_width),static_cast<unsigned>(required_height),*settings)) ResetDlss();
   previous_target_=0; previous_position_=-1;
   if (surface_manager_ != nullptr && texture_id_) {
+    std::lock_guard<std::mutex> lock(textures_mutex_);
     surface_manager_->SetSize(static_cast<int32_t>(required_width),
                               static_cast<int32_t>(required_height));
     surface_pending_ = true;
@@ -530,14 +536,18 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
             [&, enhancedDescriptor=std::make_shared<FlutterDesktopGpuSurfaceDescriptor>()](auto, auto) {
               std::lock_guard<std::mutex> lock(textures_mutex_);
               if (texture_id_) {
-                if(dlss_visible_ && dlss_ && GetDlssVideoSettings().enabled) {
+                if(dlss_visible_ && dlss_ && GetDlssVideoSettings()->enabled) {
                   // Keep the resource alive until Flutter opens it. The callback
                   // is not GPU completion; published pixels are never rewritten.
                   struct Lease {
                     std::shared_ptr<const DlssVideoFrame> frame;
                   };
+                  const bool first = !dlss_->wasRead();
                   auto lease=std::make_unique<Lease>(); lease->frame=dlss_->AcquireFrame();
                   if(lease->frame) {
+                  if (first) SetDlssVideoStatus(reinterpret_cast<int64_t>(handle_),
+                      "增强画面已提交 · " + std::to_string(surface_manager_->width()) + "×" + std::to_string(surface_manager_->height()) +
+                      " → " + std::to_string(lease->frame->width) + "×" + std::to_string(lease->frame->height));
                   // Flutter invokes release_callback while binding the image,
                   // then still reads visible_width/height from this descriptor.
                   // Keep the descriptor alive with the registered texture.
@@ -547,11 +557,25 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
                   d.height=d.visible_height=lease->frame->height;
                   d.format=kFlutterDesktopPixelFormatBGRA8888;
                   d.release_context=lease.get(); d.release_callback=[](void* p) { delete static_cast<Lease*>(p); };
-                  auto result=&d; lease.release(); return result;
+                  auto result=&d; lease.release();
+                  if (capture_ready_) { auto completed = std::move(capture_ready_); completed({}); }
+                  return result;
                   }
                 }
                 // The producer can resize immediately after this callback.
                 // Lease the published resource until Flutter opens its handle.
+                // Copy on demand: writing the public texture on the video
+                // worker races Flutter sampling it on the raster thread.
+                try {
+                  if (!surface_pending_) surface_manager_->Read();
+                } catch (const std::exception& error) {
+                  if (capture_ready_) { auto completed = std::move(capture_ready_); completed(error.what()); }
+                  SetDlssVideoStatus(reinterpret_cast<int64_t>(handle_), std::string("视频纹理同步失败：") + error.what());
+                  return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+                }
+                if (capture_ready_) {
+                  auto completed = std::move(capture_ready_); completed({});
+                }
                 auto lease = new Microsoft::WRL::ComPtr<ID3D11Texture2D>(published_texture_);
                 auto& descriptor = *enhancedDescriptor;
                 descriptor = *textures_.at(texture_id_);
@@ -608,74 +632,24 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   }
 }
 
-int64_t VideoOutput::GetVideoWidth() {
-  // Fixed width.
-  if (width_) {
-    return width_.value();
-  }
-  // Video resolution dependent width.
-  int64_t width = 0;
-  int64_t height = 0;
-
+std::pair<int64_t, int64_t> VideoOutput::GetVideoSize() {
   const auto state = video_state_->Snapshot();
-  const auto dw = state.width, dh = state.height, rotate = state.rotation;
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
-
-  const auto settings=GetDlssVideoSettings();
-  if(settings.enabled && !dlss_failed_ && width>0 && height>0) {
-    const double maxHeight=static_cast<double>(settings.maxHeight);
-    const double ratio=std::min({1.0,(maxHeight*16.0/9.0)/width,maxHeight/height});
-    return std::max<int64_t>(2,static_cast<int64_t>(width*ratio)/2*2);
+  const bool rotated = state.rotation == 90 || state.rotation == 270;
+  int64_t width = width_.value_or(rotated ? state.height : state.width);
+  int64_t height = height_.value_or(rotated ? state.width : state.height);
+  if (width <= 0 || height <= 0) return {width, height};
+  const auto settings = GetDlssVideoSettings();
+  if (settings->enabled && !dlss_failed_) {
+    const double maxHeight = settings->maxHeight;
+    const double ratio = std::min({1.0, maxHeight * 16 / (9 * width), maxHeight / height});
+    width = std::max<int64_t>(2, static_cast<int64_t>(width * ratio) / 2 * 2);
+    height = std::max<int64_t>(2, static_cast<int64_t>(height * ratio) / 2 * 2);
   }
-
-  if (pixel_buffer_ != nullptr) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect-ratio.
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return SW_RENDERING_MAX_WIDTH;
-    }
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return width / height * SW_RENDERING_MAX_HEIGHT;
-    }
+  if (pixel_buffer_) {
+    const double ratio = std::min({1.0, double(SW_RENDERING_MAX_WIDTH) / width,
+                                  double(SW_RENDERING_MAX_HEIGHT) / height});
+    width = std::max<int64_t>(1, static_cast<int64_t>(width * ratio));
+    height = std::max<int64_t>(1, static_cast<int64_t>(height * ratio));
   }
-
-  return width;
-}
-
-int64_t VideoOutput::GetVideoHeight() {
-  // Fixed height.
-  if (height_) {
-    return height_.value();
-  }
-  // Video resolution dependent height.
-  int64_t width = 0;
-  int64_t height = 0;
-
-  const auto state = video_state_->Snapshot();
-  const auto dw = state.width, dh = state.height, rotate = state.rotation;
-
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
-
-  const auto settings=GetDlssVideoSettings();
-  if(settings.enabled && !dlss_failed_ && width>0 && height>0) {
-    const double maxHeight=static_cast<double>(settings.maxHeight);
-    const double ratio=std::min({1.0,(maxHeight*16.0/9.0)/width,maxHeight/height});
-    return std::max<int64_t>(2,static_cast<int64_t>(height*ratio)/2*2);
-  }
-
-  if (pixel_buffer_ != NULL) {
-    // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
-    // |SW_RENDERING_MAX_HEIGHT| while maintaining aspect-ratio.
-    if (height >= SW_RENDERING_MAX_HEIGHT) {
-      return SW_RENDERING_MAX_HEIGHT;
-    }
-    if (width >= SW_RENDERING_MAX_WIDTH) {
-      return height / width * SW_RENDERING_MAX_WIDTH;
-    }
-  }
-
-  return height;
+  return {width, height};
 }

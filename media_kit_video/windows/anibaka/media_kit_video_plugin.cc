@@ -40,9 +40,27 @@ MediaKitVideoPlugin::MediaKitVideoPlugin(
   channel_->SetMethodCallHandler([&](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
+  enhancement_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      registrar->messenger(), "com.anibaka/video_enhancement", &flutter::StandardMethodCodec::GetInstance());
+  enhancement_channel_->SetMethodCallHandler([&](const auto& call, auto result) {
+    HandleMethodCall(call, std::move(result));
+  });
+  SetVideoPropertyListener([this](int64_t handle, const std::string& name, const std::string& value) {
+    RunOnMainThread([this, handle, name, value] {
+      enhancement_channel_->InvokeMethod("Video.Property", std::make_unique<flutter::EncodableValue>(
+          flutter::EncodableList{flutter::EncodableValue(handle), flutter::EncodableValue(name), flutter::EncodableValue(value)}));
+    });
+  });
+  SetDlssStatusListener([this] {
+    RunOnMainThread([this] {
+      enhancement_channel_->InvokeMethod("Dlss.Status", std::make_unique<flutter::EncodableValue>(GetDlssVideoStatus()));
+    });
+  });
 }
 
 MediaKitVideoPlugin::~MediaKitVideoPlugin() {
+  SetVideoPropertyListener({});
+  SetDlssStatusListener({});
   if (flutter_window_ && original_window_proc_) {
     ::SetWindowLongPtr(flutter_window_, GWLP_WNDPROC,
                        reinterpret_cast<LONG_PTR>(original_window_proc_));
@@ -104,9 +122,21 @@ void MediaKitVideoPlugin::ProcessMainThreadTasks() {
 void MediaKitVideoPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  if (method_call.method_name() == "AnimeJaNai.Properties") {
+  if (method_call.method_name() == "Video.RenderFrame") {
     const auto& args = std::get<flutter::EncodableMap>(*method_call.arguments());
-    const auto handle = std::stoll(std::get<std::string>(args.at(flutter::EncodableValue("handle"))));
+    const auto handle = args.at(flutter::EncodableValue("handle")).LongValue();
+    auto reply = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
+    video_output_manager_->RenderFrame(handle, [this, reply](std::string error) {
+      RunOnMainThread([reply, error] {
+        if (error.empty()) reply->Success();
+        else reply->Error("video_frame", error);
+      });
+    });
+    return;
+  }
+  if (method_call.method_name() == "Video.Properties") {
+    const auto& args = std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto handle = args.at(flutter::EncodableValue("handle")).LongValue();
     flutter::EncodableMap values;
     if (const auto properties = GetVideoProperties(handle)) {
       for (const auto& entry : *properties) {
@@ -119,47 +149,30 @@ void MediaKitVideoPlugin::HandleMethodCall(
   if (method_call.method_name()=="Dlss.Configure") {
     try {
       const auto& args=std::get<flutter::EncodableMap>(*method_call.arguments());
-      auto path=[&](const char* key) {
-        const auto& value=std::get<std::string>(args.at(flutter::EncodableValue(key)));
-        const int size=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0);
-        std::wstring wide(size,L'\0');
-        if(size) MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),wide.data(),size);
-        return wide;
-      };
       DlssVideoSettings settings;
       settings.enabled=std::get<bool>(args.at(flutter::EncodableValue("enabled")));
-      settings.runtime=path("runtime"); settings.cache=path("cache"); settings.fgRuntime=path("fgRuntime");
-      auto option=[&](const char* key) { return args.find(flutter::EncodableValue(key)); };
-      if(auto it=option("intensity"); it!=args.end()) {
-        const double value=std::get<double>(it->second);
-        if(!std::isfinite(value) || value<.1 || value>2.0)
-          throw std::invalid_argument("Enhancement intensity must be between 0.1 and 2.0");
-        settings.intensity=static_cast<float>(value);
+      if (settings.enabled) {
+        const auto field = [&](const char* key) -> const flutter::EncodableValue& { return args.at(flutter::EncodableValue(key)); };
+        const auto path = [&](const char* key) {
+          const auto& value = std::get<std::string>(field(key));
+          const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+          std::wstring wide(size, L'\0');
+          if (size) MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), size);
+          return wide;
+        };
+        settings.runtime=path("runtime"); settings.cache=path("cache"); settings.fgRuntime=path("fgRuntime");
+        settings.intensity=static_cast<float>(std::get<double>(field("intensity")));
+        settings.sharpness=static_cast<float>(std::get<double>(field("sharpness")));
+        settings.maxHeight=static_cast<int>(field("maxHeight").LongValue());
+        settings.superResolution=std::get<bool>(field("superResolution"));
+        settings.neuralRendering=std::get<bool>(field("neuralRendering"));
+        settings.comparison=std::get<bool>(field("comparison"));
+        settings.frameGeneration=std::get<bool>(field("frameGeneration"));
       }
-      if(auto it=option("sharpness"); it!=args.end()) {
-        const double value=std::get<double>(it->second);
-        if(!std::isfinite(value) || value<0 || value>1)
-          throw std::invalid_argument("Sharpness must be between 0 and 1");
-        settings.sharpness=static_cast<float>(value);
-      }
-      if(auto it=option("maxHeight"); it!=args.end()) {
-        const auto value=it->second.LongValue();
-        if(value!=720 && value!=1080) throw std::invalid_argument("Input limit must be 720 or 1080");
-        settings.maxHeight=static_cast<int>(value);
-      }
-      if(auto it=option("superResolution"); it!=args.end()) settings.superResolution=std::get<bool>(it->second);
-      if(auto it=option("neuralRendering"); it!=args.end()) settings.neuralRendering=std::get<bool>(it->second);
-      if(auto it=option("comparison"); it!=args.end()) settings.comparison=std::get<bool>(it->second);
-      if(auto it=option("frameGeneration"); it!=args.end()) settings.frameGeneration=std::get<bool>(it->second);
-      if(settings.enabled && settings.frameGeneration && settings.fgRuntime.empty())
-        throw std::invalid_argument("Frame generation runtime is missing");
       SetDlssVideoSettings(std::move(settings)); video_output_manager_->RefreshDlss();
       result->Success();
     } catch (const std::exception& error) { result->Error("dlss_config",error.what()); }
     return;
-  }
-  if (method_call.method_name()=="Dlss.Status") {
-    result->Success(flutter::EncodableValue(GetDlssVideoStatus())); return;
   }
   if (method_call.method_name().compare("VideoOutputManager.Create") == 0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());

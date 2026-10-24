@@ -13,6 +13,12 @@ constexpr const char* kPropertyNames[] = {
     "sharpen", "brightness", "contrast", "saturation", "gamma"};
 std::mutex registry_mutex;
 std::map<int64_t, std::weak_ptr<VideoProperties>> registry;
+VideoPropertyListener property_listener;
+}
+
+void SetVideoPropertyListener(VideoPropertyListener listener) {
+  std::lock_guard<std::mutex> lock(registry_mutex);
+  property_listener = std::move(listener);
 }
 
 std::optional<std::map<std::string, std::string>> GetVideoProperties(int64_t owner) {
@@ -89,14 +95,35 @@ void VideoStateObserver::Run() {
   while (!stopping_) {
     const auto event = mpv_wait_event(client_, -1);
     if (stopping_ || event->event_id == MPV_EVENT_SHUTDOWN) return;
+    if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
+      const auto serial = std::to_string(++playback_restart_);
+      {
+        std::lock_guard<std::mutex> lock(properties_->mutex);
+        properties_->values["playback-restart"] = serial;
+      }
+      std::lock_guard<std::mutex> lock(registry_mutex);
+      if (property_listener) property_listener(owner_, "playback-restart", serial);
+      continue;
+    }
     if (event->event_id != MPV_EVENT_PROPERTY_CHANGE) continue;
     const auto property = static_cast<mpv_event_property*>(event->data);
     if (event->reply_userdata >= kCachedProperty &&
         event->reply_userdata < kCachedProperty + std::size(kPropertyNames)) {
       const auto value = property->format == MPV_FORMAT_STRING && property->data
           ? *static_cast<char**>(property->data) : nullptr;
-      std::lock_guard<std::mutex> lock(properties_->mutex);
-      properties_->values[kPropertyNames[event->reply_userdata - kCachedProperty]] = value ? value : "";
+      const auto index = event->reply_userdata - kCachedProperty;
+      const std::string text = value ? value : "";
+      {
+        std::lock_guard<std::mutex> lock(properties_->mutex);
+        auto& previous = properties_->values[kPropertyNames[index]];
+        if (previous == text) continue;
+        previous = text;
+      }
+      // Playback clock ticks are cached for explicit reads, never pushed to UI.
+      if (index != 8) {
+        std::lock_guard<std::mutex> lock(registry_mutex);
+        if (property_listener) property_listener(owner_, kPropertyNames[index], text);
+      }
       continue;
     }
     bool resized = false;
@@ -131,7 +158,9 @@ void VideoStateObserver::Run() {
           state_.width = w; state_.height = h; state_.rotation = rotate;
           break;
         }
-        case Path: state_.path = string(); break;
+        case Path:
+          if (*state_.path != string()) state_.path = std::make_shared<const std::string>(string());
+          break;
         case Fps: state_.fps = number(); break;
         case EstimatedFps: state_.estimated_fps = number(); break;
         case Position: state_.position = number(); break;

@@ -22,9 +22,11 @@
 
 #include "utils.h"
 #include "native_gl_surface.h"
+#include "gpu_completion.h"
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 
 // |ANGLESurfaceManager| provides an abstraction around ANGLE to easily draw
 // OpenGL ES 2.0 content & read as D3D 11 texture using shared |HANDLE|.
@@ -60,7 +62,7 @@ class ANGLESurfaceManager {
 
  private:
   void SwapBuffers(bool boundedWait);
-  void EnsureProducerQuery();
+  void EnsureProducerContext();
 
   void Create();
 
@@ -79,7 +81,7 @@ class ANGLESurfaceManager {
   HANDLE handle_ = nullptr;
 
   // Sync |Draw| & |Read| calls.
-  HANDLE mutex_ = nullptr;
+  std::mutex mutex_;
   // D3D 11
   ID3D11Device* d3d_11_device_ = nullptr;
   ID3D11DeviceContext* d3d_11_device_context_ = nullptr;
@@ -87,7 +89,7 @@ class ANGLESurfaceManager {
   // above. Completion must be queried on the actual producer context.
   Microsoft::WRL::ComPtr<ID3D11Device> producer_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> producer_context_;
-  Microsoft::WRL::ComPtr<ID3D11Query> producer_query_;
+  std::unique_ptr<GpuCompletion> producer_completion_, output_completion_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> internal_d3d_11_texture_2D_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d_11_texture_2D_;
   // ANGLE

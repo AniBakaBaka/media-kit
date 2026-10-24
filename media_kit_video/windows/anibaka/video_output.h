@@ -10,6 +10,7 @@
 #define VIDEO_OUTPUT_H_
 
 #include <optional>
+#include <utility>
 
 #include <client.h>
 #include <render.h>
@@ -18,6 +19,7 @@
 #include <future>
 #include <memory>
 #include <atomic>
+#include <condition_variable>
 #include "video_bridge.h"
 #include "video_state.h"
 
@@ -78,20 +80,22 @@ class VideoOutput {
       std::function<void(int64_t, int64_t, int64_t)> callback);
 
   void SetSize(std::optional<int64_t> width, std::optional<int64_t> height);
-  void RefreshDlss() { NotifyRender(true); }
+  void RenderFrame(std::function<void(std::string)> completed);
+  void RefreshDlss() {
+    { std::lock_guard<std::mutex> lock(timing_mutex_); timing_changed_.notify_all(); }
+    NotifyRender(true);
+  }
 
  private:
   void NotifyRender(bool force = false);
 
-  void Render();
+  void Render(const mpv_render_frame_info& frame);
 
   void CheckAndResize();
 
   void Resize(int64_t required_width, int64_t required_height);
 
-  int64_t GetVideoWidth();
-
-  int64_t GetVideoHeight();
+  std::pair<int64_t, int64_t> GetVideoSize();
 
   std::optional<int64_t> height_ = std::nullopt;
   std::optional<int64_t> width_ = std::nullopt;
@@ -113,13 +117,16 @@ class VideoOutput {
   std::atomic<bool> dlss_failed_{false};
   uint64_t dlss_revision_=0;
   uint64_t dlss_applied_revision_=0;
-  uint64_t temporal_frames_=0;
+  std::optional<bool> dlss_submitted_;
   int64_t previous_target_=0;
   double previous_position_=-1;
-  std::string dlss_media_path_;
+  std::shared_ptr<const std::string> dlss_media_path_;
+  std::mutex timing_mutex_;
+  std::condition_variable timing_changed_;
   void Enhance(const mpv_render_frame_info& frame);
   void ResetDlss();
 
+  std::function<void(std::string)> capture_ready_;
   std::mutex textures_mutex_ = std::mutex();
 
   std::unordered_map<int64_t, std::unique_ptr<flutter::TextureVariant>>

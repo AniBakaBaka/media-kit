@@ -58,7 +58,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
       "${VIDEO_SOURCE_DIR}/video_state.cc"
       "${VIDEO_SOURCE_DIR}/native_gl_surface.cc")
     target_link_libraries(${PLUGIN_NAME} PRIVATE
-      baka_dlss_gpu opengl32 d3d11 dxgi gdi32 user32)
+      baka_dlss_gpu d3d11 dxgi gdi32 user32)
     include("${VIDEO_SOURCE_DIR}/probes.cmake")
     target_compile_definitions(${PLUGIN_NAME} PRIVATE NOMINMAX)
     target_compile_options(${PLUGIN_NAME} PRIVATE /utf-8)
@@ -88,6 +88,11 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     "${ANGLE_SRC}/lib/libEGL.dll.lib"
     "${ANGLE_SRC}/lib/libGLESv2.dll.lib"
   )
+  if(MEDIA_KIT_VIDEO_ENABLE_DLSS)
+    # GLES exports must resolve before opengl32's overlapping GL symbols.
+    # The native interop path resolves desktop GL explicitly through WGL.
+    target_link_libraries(${PLUGIN_NAME} PRIVATE opengl32)
+  endif()
 else()
   message(NOTICE "media_kit: WARNING: package:media_kit_libs_*** not found.")
 

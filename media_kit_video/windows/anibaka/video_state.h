@@ -16,7 +16,7 @@ struct VideoState {
   int64_t width = 0, height = 0, rotation = 0;
   double fps = 0, estimated_fps = 0, position = 0;
   bool seeking = false, hdr = false;
-  std::string path;
+  std::shared_ptr<const std::string> path = std::make_shared<const std::string>();
 };
 
 struct VideoProperties {
@@ -24,6 +24,8 @@ struct VideoProperties {
   std::map<std::string, std::string> values;
 };
 std::optional<std::map<std::string, std::string>> GetVideoProperties(int64_t owner);
+using VideoPropertyListener = std::function<void(int64_t, const std::string&, const std::string&)>;
+void SetVideoPropertyListener(VideoPropertyListener listener);
 
 class VideoStateObserver {
  public:
@@ -40,6 +42,7 @@ class VideoStateObserver {
   void Run();
   mpv_handle* client_ = nullptr;
   int64_t owner_ = 0;
+  uint64_t playback_restart_ = 0;
   std::shared_ptr<VideoProperties> properties_;
   mutable std::mutex mutex_;
   VideoState state_;

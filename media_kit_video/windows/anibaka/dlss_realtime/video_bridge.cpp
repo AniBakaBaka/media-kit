@@ -2,6 +2,7 @@
 #include "gpu.h"
 #include "common.h"
 #include "comparison_labels.h"
+#include "../gpu_completion.h"
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <d3d11_4.h>
@@ -15,35 +16,54 @@
 using Microsoft::WRL::ComPtr;
 namespace {
 std::mutex settingsMutex;
-DlssVideoSettings settingsValue;
+std::shared_ptr<const DlssVideoSettings> settingsValue = std::make_shared<const DlssVideoSettings>();
 std::map<int64_t,std::string> statuses;
+std::function<void()> status_listener;
 }
-DlssVideoSettings GetDlssVideoSettings() {
-  std::lock_guard<std::mutex> lock(settingsMutex); return settingsValue;
+std::shared_ptr<const DlssVideoSettings> GetDlssVideoSettings() {
+  return std::atomic_load(&settingsValue);
+}
+void SetDlssStatusListener(std::function<void()> listener) {
+  std::lock_guard<std::mutex> lock(settingsMutex);
+  status_listener = std::move(listener);
 }
 void SetDlssVideoSettings(DlssVideoSettings settings) {
-  std::lock_guard<std::mutex> lock(settingsMutex);
-  settings.revision=settingsValue.revision+1; settingsValue=std::move(settings);
-  statuses.clear();
+  std::function<void()> notify;
+  {
+    std::lock_guard<std::mutex> lock(settingsMutex);
+    settings.revision=std::atomic_load(&settingsValue)->revision+1;
+    std::atomic_store(&settingsValue, std::make_shared<const DlssVideoSettings>(std::move(settings)));
+    statuses.clear();
+    notify=status_listener;
+  }
+  if(notify) notify();
 }
 void SetDlssVideoStatus(int64_t owner,const std::string& status) {
   bool changed=false;
+  std::function<void()> notify;
   {
     std::lock_guard<std::mutex> lock(settingsMutex);
     auto& previous=statuses[owner];
     changed=previous.substr(0,previous.find(" ·"))!=status.substr(0,status.find(" ·"));
     previous=status;
+    if(changed) notify=status_listener;
   }
+  if(notify) notify();
   // Console I/O must not hold the mutex used by Flutter's platform thread.
   if(changed)
     LogInfo("[DLSS playback %lld] %s",static_cast<long long>(owner),status.c_str());
 }
 void RemoveDlssVideoStatus(int64_t owner) {
-  std::lock_guard<std::mutex> lock(settingsMutex); statuses.erase(owner);
+  std::function<void()> notify;
+  {
+    std::lock_guard<std::mutex> lock(settingsMutex);
+    if(statuses.erase(owner)) notify=status_listener;
+  }
+  if(notify) notify();
 }
 std::string GetDlssVideoStatus() {
   std::lock_guard<std::mutex> lock(settingsMutex);
-  if (!settingsValue.enabled) return "已关闭";
+  if (!std::atomic_load(&settingsValue)->enabled) return "已关闭";
   if (statuses.empty()) return "已开启，等待视频画面";
   std::string result;
   for (const auto& entry:statuses) { if (!result.empty()) result+="\n"; result+=entry.second; }
@@ -55,17 +75,13 @@ struct DlssVideoBridge::Impl {
   DlssVideoSettings settings;
   bool fgAvailable=false;
   uint64_t preparedSerial=0,countedSerial=0,rateStart=0,rateLast=0,rateCount=0,rateRealCount=0;
-  uint64_t generatedSubmitted=0;
-  std::atomic<uint64_t> lastReadSequence{0},generatedRead{0};
   unsigned countedOutputs=0;
   float submittedFps=0,sourceFps=0;
   bool rateReady=false;
   std::atomic<bool> read{false};
   ComPtr<ID3D11Device5> device;
   ComPtr<ID3D11DeviceContext4> context;
-  ComPtr<ID3D11Fence> fence;
-  Handle completion{CreateEventW(nullptr,FALSE,FALSE,nullptr)};
-  uint64_t fenceValue=0;
+  std::unique_ptr<GpuCompletion> completion;
   ComPtr<ID3D11Texture2D> input,real,generated,source;
   ComPtr<ID3D11Texture2D> previousInput;
   ComPtr<ID3D11ShaderResourceView> previousInputView;
@@ -91,15 +107,7 @@ struct DlssVideoBridge::Impl {
   }
   // Finish copies before either API reuses its interchange texture.
   // Fence events avoid polling sleeps that round up to the OS timer tick.
-  void Finish() {
-    Check(context->Signal(fence.Get(),++fenceValue),"Signal D3D11 transfer");
-    context->Flush();
-    if(fence->GetCompletedValue()<fenceValue) {
-      Check(fence->SetEventOnCompletion(fenceValue,completion.value),"D3D11 transfer event");
-      Require(WaitForSingleObject(completion.value,2000)==WAIT_OBJECT_0,"D3D11 texture transfer timed out");
-    }
-    Check(device->GetDeviceRemovedReason(),"D3D11 texture transfer");
-  }
+  void Finish() { completion->Wait(); }
   void OpenSource(ID3D11Texture2D* texture) {
     if(sourceIdentity.Get()==texture) return;
     ComPtr<IDXGIResource> resource; Check(texture->QueryInterface(IID_PPV_ARGS(&resource)),"Source resource");
@@ -127,8 +135,7 @@ DlssVideoBridge::DlssVideoBridge(ID3D11Texture2D* texture,const DlssVideoSetting
   Check(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,
       nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context),"DLSS bridge device");
   Check(device.As(&p.device),"D3D11 fence device"); Check(context.As(&p.context),"D3D11 fence context");
-  Require(p.completion.value!=nullptr,"Create D3D11 completion event");
-  Check(p.device->CreateFence(0,D3D11_FENCE_FLAG_NONE,IID_PPV_ARGS(&p.fence)),"D3D11 transfer fence");
+  p.completion = std::make_unique<GpuCompletion>(p.context.Get());
   auto share=[&](unsigned width,unsigned height,DXGI_FORMAT format,
                 ComPtr<ID3D11Texture2D>& target,Handle& handle,const char* operation) {
     D3D11_TEXTURE2D_DESC shared{};
@@ -294,7 +301,6 @@ bool DlssVideoBridge::Publish(bool generated) {
   if(!generated && p.settings.comparison) p.context->CopyResource(p.previousInput.Get(),p.input.Get());
   p.Finish();
   if(!generated && p.settings.comparison) p.referenceReady=true;
-  frame->sequence=p.preparedSerial*2+(generated ? 0u : 1u); frame->generated=generated;
   std::atomic_store(&p.ready,std::shared_ptr<const DlssVideoFrame>(frame));
   // Count completed, unique output submissions, not the file's nominal FPS
   // or repeated repainting of one image. The OFF half advances only for
@@ -303,7 +309,6 @@ bool DlssVideoBridge::Publish(bool generated) {
   const unsigned outputBit=generated ? 2u : 1u;
   if((p.countedOutputs&outputBit)==0) {
     p.countedOutputs|=outputBit;
-    if(generated) ++p.generatedSubmitted;
     const auto now=GetTickCount64();
     if(!p.rateStart || now-p.rateLast>2000) {
       p.rateStart=now; p.rateCount=p.rateRealCount=0; p.rateReady=false;
@@ -322,18 +327,12 @@ bool DlssVideoBridge::Publish(bool generated) {
 }
 std::shared_ptr<const DlssVideoFrame> DlssVideoBridge::AcquireFrame() {
   auto frame=std::atomic_load(&impl_->ready);
-  if(frame) {
-    impl_->read=true;
-    if(impl_->lastReadSequence.exchange(frame->sequence)!=frame->sequence && frame->generated)
-      ++impl_->generatedRead;
-  }
+  if(frame) impl_->read=true;
   return frame;
 }
 unsigned DlssVideoBridge::width() const { return impl_->w; }
 unsigned DlssVideoBridge::height() const { return impl_->h; }
 bool DlssVideoBridge::wasRead() const { return impl_->read.load(); }
-uint64_t DlssVideoBridge::generatedSubmitted() const { return impl_->generatedSubmitted; }
-uint64_t DlssVideoBridge::generatedRead() const { return impl_->generatedRead.load(); }
 bool DlssVideoBridge::CanReuse(unsigned width,unsigned height,const DlssVideoSettings& settings) const {
   const auto& p=*impl_;
   return width==p.inputWidth && height==p.inputHeight &&

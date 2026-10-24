@@ -66,3 +66,12 @@ void VideoOutputManager::RefreshDlss() {
     for (auto& entry:video_outputs_) entry.second->RefreshDlss();
   }).detach();
 }
+
+void VideoOutputManager::RenderFrame(int64_t handle, std::function<void(std::string)> completed) {
+  std::thread([this, handle, completed = std::move(completed)] {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto output = video_outputs_.find(handle);
+    if (output == video_outputs_.end()) { completed("Video output has been disposed"); return; }
+    output->second->RenderFrame(std::move(completed));
+  }).detach();
+}
