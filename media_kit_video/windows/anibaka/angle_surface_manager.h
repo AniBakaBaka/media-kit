@@ -17,14 +17,16 @@
 
 #include <Windows.h>
 
-#include <d3d.h>
 #include <d3d11.h>
 #include <wrl.h>
 
 #include "utils.h"
+#include "native_gl_surface.h"
+#include "gpu_completion.h"
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 
 // |ANGLESurfaceManager| provides an abstraction around ANGLE to easily draw
 // OpenGL ES 2.0 content & read as D3D 11 texture using shared |HANDLE|.
@@ -39,10 +41,14 @@ class ANGLESurfaceManager {
  public:
   const int32_t width() const { return width_; }
   const int32_t height() const { return height_; }
-  const HANDLE handle() const { return handle_; }
-  ID3D11Texture2D* source_texture() const { return internal_d3d_11_texture_2D_.Get(); }
+  const HANDLE handle() const { return native_ ? native_->handle() : handle_; }
+  ID3D11Texture2D* source_texture() const { return native_ ? native_->source() : internal_d3d_11_texture_2D_.Get(); }
+  ID3D11Texture2D* output_texture() const { return native_ ? native_->output() : d3d_11_texture_2D_.Get(); }
+  int framebuffer() const { return native_ ? static_cast<int>(native_->framebuffer()) : 0; }
+  bool native_cuda() const { return native_ != nullptr; }
+  void* Resolve(const char* name) const { return native_ ? native_->Resolve(name) : reinterpret_cast<void*>(eglGetProcAddress(name)); }
 
-  ANGLESurfaceManager(int32_t width, int32_t height);
+  ANGLESurfaceManager(int32_t width, int32_t height, bool native_gpu = true);
 
   ~ANGLESurfaceManager();
 
@@ -56,7 +62,7 @@ class ANGLESurfaceManager {
 
  private:
   void SwapBuffers(bool boundedWait);
-  void EnsureProducerQuery();
+  void EnsureProducerContext();
 
   void Create();
 
@@ -70,11 +76,12 @@ class ANGLESurfaceManager {
 
   int32_t width_ = 1;
   int32_t height_ = 1;
+  std::unique_ptr<NativeGLSurface> native_;
   HANDLE internal_handle_ = nullptr;
   HANDLE handle_ = nullptr;
 
   // Sync |Draw| & |Read| calls.
-  HANDLE mutex_ = nullptr;
+  std::mutex mutex_;
   // D3D 11
   ID3D11Device* d3d_11_device_ = nullptr;
   ID3D11DeviceContext* d3d_11_device_context_ = nullptr;
@@ -82,7 +89,7 @@ class ANGLESurfaceManager {
   // above. Completion must be queried on the actual producer context.
   Microsoft::WRL::ComPtr<ID3D11Device> producer_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> producer_context_;
-  Microsoft::WRL::ComPtr<ID3D11Query> producer_query_;
+  std::unique_ptr<GpuCompletion> producer_completion_, output_completion_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> internal_d3d_11_texture_2D_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d_11_texture_2D_;
   // ANGLE
@@ -90,6 +97,8 @@ class ANGLESurfaceManager {
   EGLDisplay display_ = EGL_NO_DISPLAY;
   EGLContext context_ = nullptr;
   EGLConfig config_ = nullptr;
+  PFNGLFINISHPROC finish_ = nullptr;
+  PFNGLFLUSHPROC flush_ = nullptr;
 
   static constexpr EGLint kEGLConfigurationAttributes[] = {
       EGL_RED_SIZE,   8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE,    8,

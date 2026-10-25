@@ -9,8 +9,6 @@
 
 #include <iostream>
 #include <cstdio>
-#include <thread>
-#include <chrono>
 
 namespace {
 std::runtime_error SyncError(const char* operation,unsigned long code) {
@@ -35,17 +33,16 @@ std::runtime_error SyncError(const char* operation,unsigned long code) {
 
 int ANGLESurfaceManager::instance_count_ = 0;
 
-ANGLESurfaceManager::ANGLESurfaceManager(int32_t width, int32_t height)
+ANGLESurfaceManager::ANGLESurfaceManager(int32_t width, int32_t height, bool native_gpu)
     : width_(width), height_(height) {
-  mutex_ = ::CreateMutex(NULL, FALSE, NULL);
-  Create();
+  if (native_gpu) native_ = NativeGLSurface::TryCreate(width, height);
+  if (!native_) Create();
   instance_count_++;
 }
 
 ANGLESurfaceManager::~ANGLESurfaceManager() {
-  CleanUp(true);
-  ::ReleaseMutex(mutex_);
-  ::CloseHandle(mutex_);
+  if (native_) native_.reset();
+  else CleanUp(true);
   instance_count_--;
 }
 
@@ -55,35 +52,39 @@ void ANGLESurfaceManager::SetSize(int32_t width, int32_t height) {
   }
   width_ = width;
   height_ = height;
+  if (native_) { native_->Resize(width, height); return; }
   Create();
 }
 
 void ANGLESurfaceManager::Draw(std::function<void()> callback, bool boundedWait) {
-  ::WaitForSingleObject(mutex_, INFINITE);
+  if (native_) { native_->Draw(callback); return; }
+  std::lock_guard<std::mutex> lock(mutex_);
   try {
     MakeCurrent(true);
     callback();
     SwapBuffers(boundedWait);
   } catch(...) {
     MakeCurrent(false);
-    ::ReleaseMutex(mutex_);
     throw;
   }
   MakeCurrent(false);
-  ::ReleaseMutex(mutex_);
 }
 
 void ANGLESurfaceManager::Read() {
-  ::WaitForSingleObject(mutex_, INFINITE);
+  if (native_) { native_->Read(); return; }
+  std::lock_guard<std::mutex> lock(mutex_);
   if (d3d_11_device_context_ != nullptr) {
     d3d_11_device_context_->CopyResource(d3d_11_texture_2D_.Get(),
                                          internal_d3d_11_texture_2D_.Get());
-    d3d_11_device_context_->Flush();
+    // The next ANGLE draw uses another device. Complete this copy before
+    // releasing Draw/Read's mutex, otherwise it can read a rewritten frame.
+    if (!output_completion_) output_completion_ = std::make_unique<GpuCompletion>(d3d_11_device_context_);
+    output_completion_->Wait();
   }
-  ::ReleaseMutex(mutex_);
 }
 
 void ANGLESurfaceManager::MakeCurrent(bool value) {
+  if (native_) { native_->MakeCurrent(value); return; }
   if (value) {
     if(eglMakeCurrent(display_,surface_,surface_,context_)!=EGL_TRUE)
       throw SyncError("ANGLE make current failed",static_cast<unsigned long>(eglGetError()));
@@ -93,29 +94,17 @@ void ANGLESurfaceManager::MakeCurrent(bool value) {
 }
 
 void ANGLESurfaceManager::SwapBuffers(bool boundedWait) {
-  if(!boundedWait) { glFinish(); return; }
+  if(!boundedWait) { finish_(); return; }
   // EGL entry points can exist even when the active ES2 backend cannot
   // create KHR fences. Query the real D3D11 producer instead.
   if(eglGetCurrentContext()!=context_ || eglGetCurrentDisplay()!=display_) MakeCurrent(true);
-  EnsureProducerQuery();
-  glFlush();
-  producer_context_->End(producer_query_.Get());
-  producer_context_->Flush();
-  const auto deadline=GetTickCount64()+2000;
-  for(;;) {
-    BOOL completed=FALSE;
-    const auto result=producer_context_->GetData(producer_query_.Get(),&completed,sizeof(completed),0);
-    if(result==S_OK && completed) return;
-    if(FAILED(result)) throw SyncError("ANGLE producer completion query failed",static_cast<unsigned long>(result));
-    const auto removed=producer_device_->GetDeviceRemovedReason();
-    if(FAILED(removed)) throw SyncError("ANGLE producer device removed",static_cast<unsigned long>(removed));
-    if(GetTickCount64()>=deadline) throw std::runtime_error("ANGLE D3D11 producer wait timed out (2000 ms)");
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  EnsureProducerContext();
+  flush_();
+  producer_completion_->Wait();
 }
 
-void ANGLESurfaceManager::EnsureProducerQuery() {
-  if(producer_query_) return;
+void ANGLESurfaceManager::EnsureProducerContext() {
+  if(producer_completion_) return;
   const auto queryDisplay=reinterpret_cast<PFNEGLQUERYDISPLAYATTRIBEXTPROC>(eglGetProcAddress("eglQueryDisplayAttribEXT"));
   const auto queryDevice=reinterpret_cast<PFNEGLQUERYDEVICEATTRIBEXTPROC>(eglGetProcAddress("eglQueryDeviceAttribEXT"));
   if(!queryDisplay || !queryDevice) throw std::runtime_error("ANGLE native device query unavailable");
@@ -128,9 +117,7 @@ void ANGLESurfaceManager::EnsureProducerQuery() {
   producer_device_=reinterpret_cast<ID3D11Device*>(nativeDevice);
   producer_device_->GetImmediateContext(&producer_context_);
   if(!producer_context_) throw std::runtime_error("ANGLE producer context unavailable");
-  D3D11_QUERY_DESC description{D3D11_QUERY_EVENT,0};
-  const auto result=producer_device_->CreateQuery(&description,&producer_query_);
-  if(FAILED(result)) throw SyncError("ANGLE producer query creation failed",static_cast<unsigned long>(result));
+  producer_completion_ = std::make_unique<GpuCompletion>(producer_context_.Get());
 }
 
 void ANGLESurfaceManager::Create() {
@@ -155,12 +142,10 @@ void ANGLESurfaceManager::Create() {
 
 void ANGLESurfaceManager::CleanUp(bool release_context) {
   if (release_context) {
-    producer_query_.Reset();
+    producer_completion_.reset();
+    output_completion_.reset();
     producer_context_.Reset();
     producer_device_.Reset();
-    if (display_ != EGL_NO_DISPLAY && surface_ != EGL_NO_SURFACE) {
-      eglReleaseTexImage(display_, surface_, EGL_BACK_BUFFER);
-    }
     if (display_ != EGL_NO_DISPLAY && context_ != EGL_NO_CONTEXT) {
       eglDestroyContext(display_, context_);
       context_ = EGL_NO_CONTEXT;
@@ -343,6 +328,14 @@ bool ANGLESurfaceManager::CreateAndBindEGLSurface() {
     if (context_ == EGL_NO_CONTEXT) {
       FAIL("eglCreateContext");
     }
+    // Desktop GL and GLES have overlapping symbols in this plugin. Resolve
+    // through the EGL implementation that owns the context instead of relying
+    // on the linker's selection of an unqualified glFinish/glFlush.
+    finish_ = reinterpret_cast<PFNGLFINISHPROC>(eglGetProcAddress("glFinish"));
+    flush_ = reinterpret_cast<PFNGLFLUSHPROC>(eglGetProcAddress("glFlush"));
+    if (!finish_ || !flush_) {
+      FAIL("ANGLE synchronization entry points");
+    }
   }
   EGLint buffer_attributes[] = {
       EGL_WIDTH,          width_,         EGL_HEIGHT,         height_,
@@ -355,11 +348,5 @@ bool ANGLESurfaceManager::CreateAndBindEGLSurface() {
   if (surface_ == EGL_NO_SURFACE) {
     FAIL("eglCreatePbufferFromClientBuffer");
   }
-  GLuint t;
-  glGenTextures(1, &t);
-  glBindTexture(GL_TEXTURE_2D, t);
-  eglBindTexImage(display_, surface_, EGL_BACK_BUFFER);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   return true;
 }

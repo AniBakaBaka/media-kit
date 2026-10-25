@@ -44,6 +44,7 @@ class MediaKitVideoPlugin : public flutter::Plugin {
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_ =
       nullptr;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> enhancement_channel_;
   std::unique_ptr<VideoOutputManager> video_output_manager_ = nullptr;
   HWND flutter_window_ = nullptr;
   WNDPROC original_window_proc_ = nullptr;

@@ -1,0 +1,18 @@
+AnimeJaNai integration in AniBaka
+
+libmpv: the-database/mpv build 2026-10-09-19c0fcf895.
+Corresponding source: https://github.com/the-database/mpv/tree/19c0fcf895
+Build scripts: https://github.com/the-database/mpv-winbuild
+mpv and its bundled dependencies retain their respective licenses. The linked
+mpv source contains the GPL/LGPL license texts and third-party build references.
+
+7-Zip 26.02 standalone console, Copyright (C) Igor Pavlov.
+See accompanying License.txt. Source: https://www.7-zip.org/
+
+Downloaded separately on first enable:
+AJI v0.11.1: https://github.com/the-database/animejanai-inference/tree/v0.11.1
+AnimeJaNai ONNX models by the-database, unmodified, CC BY-NC-SA 4.0:
+https://github.com/the-database/mpv-AnimeJaNai/tree/6361f4fe059d22984f9074860a4a227489a5d464
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+NVIDIA TensorRT/CUDA and Microsoft ONNX Runtime/DirectML retain their own
+licenses, installed alongside the runtime in the application's data directory.

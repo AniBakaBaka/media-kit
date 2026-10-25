@@ -41,8 +41,9 @@ class VideoOutputManager {
                std::optional<int64_t> height);
 
   // Destroys the |VideoOutput| with given handle.
-  void Dispose(int64_t handle);
+  void Dispose(int64_t handle, std::function<void()> completed);
   void RefreshDlss();
+  void RenderFrame(int64_t handle, std::function<void(std::string)> completed);
 
   ~VideoOutputManager();
 
