@@ -328,9 +328,9 @@ bool ANGLESurfaceManager::CreateAndBindEGLSurface() {
     if (context_ == EGL_NO_CONTEXT) {
       FAIL("eglCreateContext");
     }
-    // Resolve through the EGL implementation that owns this context. The
-    // NGX debug library also imports desktop GL; linker order alone cannot
-    // guarantee that an unqualified glFinish/glFlush targets ANGLE.
+    // Desktop GL and GLES have overlapping symbols in this plugin. Resolve
+    // through the EGL implementation that owns the context instead of relying
+    // on the linker's selection of an unqualified glFinish/glFlush.
     finish_ = reinterpret_cast<PFNGLFINISHPROC>(eglGetProcAddress("glFinish"));
     flush_ = reinterpret_cast<PFNGLFLUSHPROC>(eglGetProcAddress("glFlush"));
     if (!finish_ || !flush_) {

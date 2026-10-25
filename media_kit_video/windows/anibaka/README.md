@@ -10,8 +10,8 @@ unchanged. The host provides no native source replacements or GPU target.
 AnimeJaNai, Anime4K and DLSS use D3D11/ANGLE. Completed texture leases survive
 resize and disposal; published enhanced textures are immutable. Teardown
 releases GPU output and mpv rendering resources before replying to Flutter.
-ANGLE resolves `glFinish`/`glFlush` through its EGL resolver, so NGX's desktop GL
-imports cannot override frame synchronization in Debug or Release. The native
+ANGLE resolves `glFinish`/`glFlush` through its EGL resolver, so desktop GL
+symbol resolution cannot override frame synchronization in Debug or Release. The native
 interop path resolves desktop GL through WGL. Every mpv render API call runs
 with its creation context current, including update and frame-info queries.
 
