@@ -94,12 +94,12 @@ void ANGLESurfaceManager::MakeCurrent(bool value) {
 }
 
 void ANGLESurfaceManager::SwapBuffers(bool boundedWait) {
-  if(!boundedWait) { glFinish(); return; }
+  if(!boundedWait) { finish_(); return; }
   // EGL entry points can exist even when the active ES2 backend cannot
   // create KHR fences. Query the real D3D11 producer instead.
   if(eglGetCurrentContext()!=context_ || eglGetCurrentDisplay()!=display_) MakeCurrent(true);
   EnsureProducerContext();
-  glFlush();
+  flush_();
   producer_completion_->Wait();
 }
 
@@ -327,6 +327,14 @@ bool ANGLESurfaceManager::CreateAndBindEGLSurface() {
                                 kEGLContextAttributes);
     if (context_ == EGL_NO_CONTEXT) {
       FAIL("eglCreateContext");
+    }
+    // Resolve through the EGL implementation that owns this context. The
+    // NGX debug library also imports desktop GL; linker order alone cannot
+    // guarantee that an unqualified glFinish/glFlush targets ANGLE.
+    finish_ = reinterpret_cast<PFNGLFINISHPROC>(eglGetProcAddress("glFinish"));
+    flush_ = reinterpret_cast<PFNGLFLUSHPROC>(eglGetProcAddress("glFlush"));
+    if (!finish_ || !flush_) {
+      FAIL("ANGLE synchronization entry points");
     }
   }
   EGLint buffer_attributes[] = {

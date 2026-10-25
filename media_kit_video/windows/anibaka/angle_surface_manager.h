@@ -97,6 +97,8 @@ class ANGLESurfaceManager {
   EGLDisplay display_ = EGL_NO_DISPLAY;
   EGLContext context_ = nullptr;
   EGLConfig config_ = nullptr;
+  PFNGLFINISHPROC finish_ = nullptr;
+  PFNGLFLUSHPROC flush_ = nullptr;
 
   static constexpr EGLint kEGLConfigurationAttributes[] = {
       EGL_RED_SIZE,   8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE,    8,

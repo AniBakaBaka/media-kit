@@ -205,10 +205,14 @@ void VideoOutput::NotifyRender(bool force) {
     render_queued_=false;
     if (destroyed_) return;
     const bool forced = force_render_.exchange(false);
+    // Every mpv_render_* call requires the creation context to be current,
+    // including update/get_info (which may service hardware interop work).
+    if (surface_manager_) surface_manager_->MakeCurrent(true);
     const auto updates = mpv_render_context_update(render_context_);
-    if (!forced && !(updates & MPV_RENDER_UPDATE_FRAME)) return;
     mpv_render_frame_info frame{};
     mpv_render_context_get_info(render_context_, {MPV_RENDER_PARAM_NEXT_FRAME_INFO, &frame});
+    if (surface_manager_) surface_manager_->MakeCurrent(false);
+    if (!forced && !(updates & MPV_RENDER_UPDATE_FRAME)) return;
     // A reconfiguration can invalidate a queued frame before dimensions clear.
     // Consume that notification without clearing the published texture.
     if (!forced && !(frame.flags & MPV_RENDER_FRAME_INFO_PRESENT)) return;
